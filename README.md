@@ -31,7 +31,7 @@ O FFmpeg é procurado na pasta do app, em `ffmpeg\` ao lado dele e no PATH.
 ```bash
 pwsh tools/fetch_ffmpeg.ps1
 pwsh tools/package_msix.ps1 -Register
-pwsh tools/package_msix.ps1 -IdentityName <identidade do Partner Center>
+pwsh tools/package_msix.ps1
 ```
 
 O primeiro baixa o FFmpeg LGPL fixado por SHA-256, o segundo registra o pacote

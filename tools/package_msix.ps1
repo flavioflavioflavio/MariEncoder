@@ -1,10 +1,11 @@
 # tools/package_msix.ps1 — Pacote MSIX da Microsoft Store do Mari Encoder.
 #
-#   pwsh tools/package_msix.ps1 -IdentityName <...> -Publisher <...>   # pacote para a Store
-#   pwsh tools/package_msix.ps1 -Register                              # teste local (Modo de Desenvolvedor)
+#   pwsh tools/package_msix.ps1             # pacote para enviar à Store
+#   pwsh tools/package_msix.ps1 -Register   # teste local (Modo de Desenvolvedor)
 #
-# Identidade: Partner Center → Mari Encoder → Gerenciamento do produto →
-# Identidade do produto. Até reservar o nome, -Register usa uma identidade de teste.
+# Identidade (padrões abaixo): Partner Center → Mari Encoder (9PF1F6D3K24D) →
+# Gerenciamento do produto → Identidade do produto. -Register usa uma identidade
+# de teste (.Dev) para não conflitar com a versão instalada pela Store.
 # A Store re-assina o pacote; nenhum certificado próprio é necessário.
 # Saída: dist/MariEncoder-<versão>.msix (e dist/msix-stage com o layout).
 
@@ -25,8 +26,7 @@ $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
 if (-not $IdentityName) {
-    if (-not $Register) { throw "Informe -IdentityName (Partner Center → Identidade do produto) ou use -Register para teste local." }
-    $IdentityName = "Takemoto.MariEncoder.Dev"
+    $IdentityName = if ($Register) { "Takemoto.MariEncoder.Dev" } else { "Takemoto.MariEncoder" }
 }
 
 $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
