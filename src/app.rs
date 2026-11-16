@@ -2,6 +2,7 @@
 //! contextual) mostra só o progresso e fecha sozinha ao terminar.
 
 use crate::config::{AudioCodec, Config, Container, Hw, Preset, RateMode, Speed, VideoCodec};
+use crate::i18n::Language;
 use crate::ffmpeg::{self, Tools};
 use crate::ipc::{self, Msg};
 use crate::queue::{Job, JobState, Queue};
@@ -19,7 +20,7 @@ const COMPACT_SIZE: [f32; 2] = [540.0, 300.0];
 pub fn run(initial: Msg) {
     let compact = initial.start && !initial.files.is_empty();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("QuickEncoder")
+        .with_title(crate::brand::APP_NAME)
         .with_inner_size(if compact { COMPACT_SIZE } else { FULL_SIZE })
         .with_min_inner_size([440.0, 220.0])
         .with_drag_and_drop(true);
@@ -28,7 +29,7 @@ pub fn run(initial: Msg) {
     }
     let options = eframe::NativeOptions { viewport, centered: true, ..Default::default() };
     let _ = eframe::run_native(
-        "QuickEncoder",
+        crate::brand::APP_NAME,
         options,
         Box::new(move |cc| Ok(Box::new(App::new(cc, initial, compact)))),
     );
@@ -39,6 +40,7 @@ enum Tab {
     Queue,
     Presets,
     Settings,
+    About,
 }
 
 struct App {
@@ -54,6 +56,9 @@ struct App {
     /// Preset aplicado aos arquivos adicionados pela janela.
     current_preset: String,
     edit_sel: usize,
+    about: crate::about::About,
+    /// Rodando dentro do pacote da Microsoft Store (o menu vem do manifesto).
+    packaged: bool,
     menu_installed: bool,
     /// Pacote do menu principal do Windows 11 registrado.
     modern_installed: bool,
@@ -66,6 +71,7 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>, initial: Msg, compact: bool) -> Self {
         theme::apply(&cc.egui_ctx);
         let cfg = Config::load();
+        crate::i18n::init(cfg.language);
         if !Config::path().exists() {
             let _ = cfg.save();
         }
@@ -89,6 +95,8 @@ impl App {
             tab: Tab::Queue,
             compact,
             edit_sel: 0,
+            about: Default::default(),
+            packaged: shell::is_packaged(),
             menu_installed: shell::is_installed(),
             modern_installed: shell::modern_installed(),
             toast: None,
@@ -115,7 +123,11 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         if let Some(tab) = msg.tab.as_deref() {
-            self.tab = if tab == "settings" { Tab::Settings } else { Tab::Presets };
+            self.tab = match tab {
+                "settings" => Tab::Settings,
+                "about" => Tab::About,
+                _ => Tab::Presets,
+            };
             self.expand(ctx);
         }
         if msg.files.is_empty() {
@@ -128,7 +140,7 @@ impl App {
             (_, start) => {
                 // Sem preset (ou preset que não existe mais): só coloca na lista.
                 if start {
-                    self.toast("Esse preset não existe mais — escolha outro na lista.", true);
+                    self.toast(t!("toast-preset-missing"), true);
                 }
                 self.add_idle(files);
                 self.expand(ctx);
@@ -143,24 +155,24 @@ impl App {
         let preset = self.cfg.preset(&self.current_preset).or(self.cfg.fallback_preset()).cloned();
         match preset {
             Some(p) => self.queue.add(files, &p, false),
-            None => self.toast("Crie um preset antes de adicionar arquivos.", true),
+            None => self.toast(t!("toast-create-preset-first"), true),
         }
     }
 
     /// Salva a configuração e propaga o que depende dela (menu contextual, ffmpeg).
     fn persist(&mut self) {
         if let Err(e) = self.cfg.save() {
-            self.toast(format!("Não foi possível salvar a configuração: {e}"), true);
+            self.toast(t!("toast-save-failed", error => e), true);
         }
-        if self.menu_installed {
+        if self.menu_installed && !self.packaged {
             if let Err(e) = shell::install(&self.cfg) {
-                self.toast(format!("Não foi possível atualizar o menu contextual: {e}"), true);
+                self.toast(t!("toast-menu-update-failed", error => e), true);
             }
         }
-        if self.modern_installed {
+        if self.modern_installed && !self.packaged {
             // Só registra de novo se a lista de extensões mudou; os presets a DLL lê na hora.
             if let Err(e) = shell::install_modern(&self.cfg) {
-                self.toast(format!("Não foi possível atualizar o menu do Windows 11: {e}"), true);
+                self.toast(t!("toast-modern-update-failed", error => e), true);
             }
         }
         self.dirty_at = None;
@@ -170,9 +182,9 @@ impl App {
         let classic = shell::install(&self.cfg);
         let modern = if shell::modern_available() { Some(shell::install_modern(&self.cfg)) } else { None };
         match (classic, modern) {
-            (Err(e), _) => self.toast(format!("Falha ao instalar o menu: {e}"), true),
-            (Ok(()), Some(Err(e))) => self.toast(format!("Menu clássico instalado. Menu do Windows 11 falhou: {e}"), true),
-            (Ok(()), _) => self.toast("Menu contextual instalado.", false),
+            (Err(e), _) => self.toast(t!("toast-menu-install-failed", error => e), true),
+            (Ok(()), Some(Err(e))) => self.toast(t!("toast-menu-modern-failed", error => e), true),
+            (Ok(()), _) => self.toast(t!("toast-menu-installed"), false),
         }
         self.menu_installed = shell::is_installed();
         self.modern_installed = shell::modern_installed();
@@ -182,8 +194,8 @@ impl App {
         let classic = shell::uninstall().map_err(|e| e.to_string());
         let modern = shell::uninstall_modern();
         match classic.and(modern) {
-            Ok(()) => self.toast("Menu contextual removido.", false),
-            Err(e) => self.toast(format!("Falha ao remover o menu: {e}"), true),
+            Ok(()) => self.toast(t!("toast-menu-removed"), false),
+            Err(e) => self.toast(t!("toast-menu-remove-failed", error => e), true),
         }
         self.menu_installed = shell::is_installed();
         self.modern_installed = shell::modern_installed();
@@ -257,9 +269,9 @@ impl App {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("QuickEncoder").family(theme::semibold()).size(17.0));
+            ui.label(RichText::new(crate::brand::APP_NAME).family(theme::semibold()).size(17.0));
             ui.add_space(14.0);
-            for (tab, label) in [(Tab::Queue, "Fila"), (Tab::Presets, "Presets"), (Tab::Settings, "Ajustes")] {
+            for (tab, label) in [(Tab::Queue, t!("tab-queue")), (Tab::Presets, t!("tab-presets")), (Tab::Settings, t!("tab-settings")), (Tab::About, t!("tab-about"))] {
                 let selected = self.tab == tab;
                 let text = RichText::new(label).color(if selected { theme::TEXT } else { theme::MUTED });
                 let fill = if selected { theme::CONTROL } else { Color32::TRANSPARENT };
@@ -272,7 +284,7 @@ impl App {
                     let color = if *is_error { theme::ERR } else { theme::OK };
                     ui.add(egui::Label::new(RichText::new(text).size(12.5).color(color)).truncate());
                 } else if self.tools.is_none() {
-                    ui.label(RichText::new("ffmpeg não encontrado — veja Ajustes").size(12.5).color(theme::ERR));
+                    ui.label(RichText::new(t!("ffmpeg-missing-banner")).size(12.5).color(theme::ERR));
                 }
             });
         });
@@ -283,9 +295,9 @@ impl App {
     fn pick_files(&mut self) {
         let exts: Vec<&str> = self.cfg.extensions.iter().map(String::as_str).collect();
         let picked = rfd::FileDialog::new()
-            .set_title("Adicionar vídeos")
-            .add_filter("Vídeos", &exts)
-            .add_filter("Todos os arquivos", &["*"])
+            .set_title(t!("dialog-add-videos"))
+            .add_filter(t!("filter-videos"), &exts)
+            .add_filter(t!("filter-all-files"), &["*"])
             .pick_files();
         if let Some(files) = picked {
             self.add_idle(files);
@@ -294,11 +306,11 @@ impl App {
 
     fn queue_toolbar(&mut self, ui: &mut egui::Ui, jobs: &[Job]) {
         ui.horizontal(|ui| {
-            if ui.button("➕  Adicionar arquivos").clicked() {
+            if ui.button(t!("queue-add-files")).clicked() {
                 self.pick_files();
             }
             ui.add_space(8.0);
-            ui.label(RichText::new("Preset").color(theme::MUTED));
+            ui.label(RichText::new(t!("queue-preset")).color(theme::MUTED));
             let current = self.cfg.preset(&self.current_preset).map(|p| p.name.clone()).unwrap_or_else(|| "—".into());
             egui::ComboBox::from_id_salt("current_preset").width(190.0).selected_text(current).show_ui(ui, |ui| {
                 for p in &self.cfg.presets {
@@ -306,7 +318,7 @@ impl App {
                 }
             });
             let has_idle = jobs.iter().any(|j| j.state == JobState::Idle);
-            if has_idle && ui.button("Aplicar a todos").on_hover_text("Usa este preset em todos os arquivos que ainda não começaram").clicked() {
+            if has_idle && ui.button(t!("queue-apply-all")).on_hover_text(t!("queue-apply-all-tip")).clicked() {
                 if let Some(p) = self.cfg.preset(&self.current_preset) {
                     self.queue.set_preset_all_idle(p);
                 }
@@ -358,7 +370,7 @@ impl App {
         let icon = |ui: &mut egui::Ui, glyph: &str, tip: &str| ui.button(glyph).on_hover_text(tip).clicked();
         match job.state {
             JobState::Idle => {
-                if icon(ui, "✖", "Remover da lista") {
+                if icon(ui, "✖", &t!("job-remove")) {
                     self.queue.remove(job.id);
                 }
                 egui::ComboBox::from_id_salt(("job_preset", job.id))
@@ -373,25 +385,25 @@ impl App {
                     });
             }
             JobState::Queued | JobState::Running => {
-                if icon(ui, "✖", "Cancelar") {
+                if icon(ui, "✖", &t!("job-cancel")) {
                     self.queue.cancel(job.id);
                 }
             }
             JobState::Done => {
-                if icon(ui, "✖", "Remover da lista") {
+                if icon(ui, "✖", &t!("job-remove")) {
                     self.queue.remove(job.id);
                 }
-                if icon(ui, "Abrir pasta", "Mostra o arquivo gerado no Explorer") {
+                if icon(ui, &t!("job-open-folder"), &t!("job-open-folder-tip")) {
                     if let Some(out) = &job.output {
                         reveal(out);
                     }
                 }
             }
             JobState::Failed | JobState::Cancelled => {
-                if icon(ui, "✖", "Remover da lista") {
+                if icon(ui, "✖", &t!("job-remove")) {
                     self.queue.remove(job.id);
                 }
-                if icon(ui, "⟲", "Tentar de novo") {
+                if icon(ui, "⟲", &t!("job-retry")) {
                     self.queue.start(job.id);
                 }
             }
@@ -404,33 +416,29 @@ impl App {
         let active = count(JobState::Queued) + count(JobState::Running);
         let finished = count(JobState::Done) + count(JobState::Failed) + count(JobState::Cancelled);
         ui.horizontal(|ui| {
-            let mut parts = vec![match jobs.len() {
-                0 => "Nenhum arquivo".to_string(),
-                1 => "1 arquivo".to_string(),
-                n => format!("{n} arquivos"),
-            }];
+            let mut parts = vec![t!("queue-count", count => jobs.len())];
             if active > 0 {
-                parts.push(format!("{active} em andamento"));
+                parts.push(t!("queue-active", count => active));
             }
             if count(JobState::Done) > 0 {
-                parts.push(format!("{} concluído(s)", count(JobState::Done)));
+                parts.push(t!("queue-done", count => count(JobState::Done)));
             }
             if count(JobState::Failed) > 0 {
-                parts.push(format!("{} com erro", count(JobState::Failed)));
+                parts.push(t!("queue-failed", count => count(JobState::Failed)));
             }
             ui.label(RichText::new(parts.join("  ·  ")).color(theme::MUTED).size(12.5));
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if idle > 0 {
-                    let label = if idle == 1 { "▶  Encodar".to_string() } else { format!("▶  Encodar {idle} arquivos") };
+                    let label = if idle == 1 { t!("queue-encode-one") } else { t!("queue-encode-many", count => idle) };
                     if primary_button(ui, &label).clicked() {
                         self.queue.start_all_idle();
                     }
                 }
-                if active > 0 && ui.button("Cancelar tudo").clicked() {
+                if active > 0 && ui.button(t!("queue-cancel-all")).clicked() {
                     self.queue.cancel_all();
                 }
-                if finished > 0 && ui.button("Limpar concluídos").clicked() {
+                if finished > 0 && ui.button(t!("queue-clear-finished")).clicked() {
                     self.queue.clear_finished();
                 }
             });
@@ -440,10 +448,10 @@ impl App {
     fn empty_state(&self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.32).max(20.0));
-            ui.label(RichText::new("Arraste vídeos ou pastas para cá").family(theme::semibold()).size(19.0));
+            ui.label(RichText::new(t!("queue-empty-title")).family(theme::semibold()).size(19.0));
             ui.add_space(2.0);
             ui.label(
-                RichText::new("ou use o botão direito num vídeo no Explorer → QuickEncoder").color(theme::MUTED),
+                RichText::new(t!("queue-empty-hint", menu => crate::brand::MENU_NAME)).color(theme::MUTED),
             );
         });
     }
@@ -466,14 +474,14 @@ impl App {
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("QuickEncoder").family(theme::semibold()).size(15.0));
+                    ui.label(RichText::new(crate::brand::APP_NAME).family(theme::semibold()).size(15.0));
                     if let Some((text, is_error, _)) = &self.toast {
                         ui.label(RichText::new(text).size(12.5).color(if *is_error { theme::ERR } else { theme::OK }));
                     } else if self.done_at.is_some() {
-                        ui.label(RichText::new("Concluído ✔").size(12.5).color(theme::OK));
+                        ui.label(RichText::new(t!("compact-done")).size(12.5).color(theme::OK));
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Abrir janela completa").clicked() {
+                        if ui.button(t!("compact-open-full")).clicked() {
                             let ctx = ui.ctx().clone();
                             self.expand(&ctx);
                         }
@@ -505,7 +513,7 @@ impl App {
                     });
                 }
                 None => {
-                    ui.label(RichText::new("Nenhum preset. Crie um em “Novo”.").color(theme::MUTED));
+                    ui.label(RichText::new(t!("presets-empty")).color(theme::MUTED));
                 }
             }
         });
@@ -513,16 +521,16 @@ impl App {
 
     fn preset_list(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("➕ Novo").clicked() {
+            if ui.button(t!("presets-new")).clicked() {
                 let mut p = Preset::default();
                 p.id = self.cfg.unique_id(&p.name);
                 self.cfg.presets.push(p);
                 self.edit_sel = self.cfg.presets.len() - 1;
             }
             let has_sel = self.edit_sel < self.cfg.presets.len();
-            if ui.add_enabled(has_sel, egui::Button::new("Duplicar")).clicked() {
+            if ui.add_enabled(has_sel, egui::Button::new(t!("presets-duplicate"))).clicked() {
                 let mut p = self.cfg.presets[self.edit_sel].clone();
-                p.name = format!("{} (cópia)", p.name);
+                p.name = t!("presets-copy-name", name => p.name);
                 p.id = self.cfg.unique_id(&p.name);
                 self.cfg.presets.insert(self.edit_sel + 1, p);
                 self.edit_sel += 1;
@@ -547,7 +555,7 @@ impl App {
                         ui.add(egui::Label::new(name).selectable(false).truncate());
                         let mut summary = p.summary();
                         if !p.in_menu {
-                            summary.push_str(" · fora do menu");
+                            summary.push_str(&format!(" · {}", t!("presets-not-in-menu")));
                         }
                         ui.add(
                             egui::Label::new(RichText::new(summary).size(12.0).color(theme::MUTED))
@@ -570,16 +578,16 @@ impl App {
         ui.horizontal(|ui| {
             let n = self.cfg.presets.len();
             let sel = self.edit_sel;
-            if ui.add_enabled(sel > 0 && n > 1, egui::Button::new("↑")).on_hover_text("Subir no menu").clicked() {
+            if ui.add_enabled(sel > 0 && n > 1, egui::Button::new("↑")).on_hover_text(t!("presets-move-up")).clicked() {
                 self.cfg.presets.swap(sel, sel - 1);
                 self.edit_sel -= 1;
             }
-            if ui.add_enabled(sel + 1 < n, egui::Button::new("↓")).on_hover_text("Descer no menu").clicked() {
+            if ui.add_enabled(sel + 1 < n, egui::Button::new("↓")).on_hover_text(t!("presets-move-down")).clicked() {
                 self.cfg.presets.swap(sel, sel + 1);
                 self.edit_sel += 1;
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add_enabled(n > 1, egui::Button::new("Excluir")).clicked() {
+                if ui.add_enabled(n > 1, egui::Button::new(t!("presets-delete"))).clicked() {
                     self.cfg.presets.remove(sel);
                     self.edit_sel = sel.min(self.cfg.presets.len() - 1);
                 }
@@ -594,36 +602,50 @@ impl App {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 10.0;
 
-                section(ui, "Menu contextual do Windows", |ui| {
+                if self.packaged {
+                    section(ui, &t!("settings-menu"), |ui| {
+                        ui.label(RichText::new(t!("settings-menu-store")).color(theme::OK));
+                        hint(ui, &t!("settings-menu-store-hint", menu => crate::brand::MENU_NAME));
+                    });
+                }
+                if !self.packaged {
+                section(ui, &t!("settings-menu"), |ui| {
                     ui.horizontal(|ui| {
                         let installed = self.menu_installed || self.modern_installed;
                         let (text, color) = match (self.modern_installed, self.menu_installed) {
-                            (true, true) => ("● Instalado — menu do Windows 11 e menu clássico", theme::OK),
-                            (true, false) => ("● Instalado — só no menu do Windows 11", theme::OK),
-                            (false, true) => ("● Instalado — só no menu clássico", theme::OK),
-                            (false, false) => ("● Não instalado", theme::MUTED),
+                            (true, true) => (t!("settings-menu-both"), theme::OK),
+                            (true, false) => (t!("settings-menu-modern-only"), theme::OK),
+                            (false, true) => (t!("settings-menu-classic-only"), theme::OK),
+                            (false, false) => (t!("settings-menu-not-installed"), theme::MUTED),
                         };
                         ui.label(RichText::new(text).color(color));
                         ui.add_space(8.0);
-                        if primary_button(ui, if installed { "Atualizar" } else { "Instalar" }).clicked() {
+                        if primary_button(ui, &if installed { t!("settings-update") } else { t!("settings-install") }).clicked() {
                             self.install_menus();
                         }
-                        if installed && ui.button("Remover").clicked() {
+                        if installed && ui.button(t!("settings-remove")).clicked() {
                             self.uninstall_menus();
                         }
                     });
-                    hint(ui, "Botão direito num vídeo → QuickEncoder, com um item por preset. No menu clássico (“Mostrar mais opções” ou Shift + botão direito) ele fica no topo; no menu principal do Windows 11 é o sistema que decide a posição. Não precisa de administrador.");
+                    hint(ui, &t!("settings-menu-hint", menu => crate::brand::MENU_NAME));
                     if self.menu_installed && !self.modern_installed {
                         let why = if shell::modern_available() {
-                            "O menu principal do Windows 11 não está registrado: sem assinatura, ele exige o Modo de Desenvolvedor ligado. Clique em Atualizar para tentar de novo."
+                            t!("settings-modern-needs-devmode")
                         } else {
-                            "Menu principal do Windows 11 indisponível: precisa do Windows 11 e da quickencoder_menu.dll na pasta do app."
+                            t!("settings-modern-unavailable")
                         };
-                        hint(ui, why);
+                        hint(ui, &why);
                     }
                 });
+                }
 
-                section(ui, "Extensões com o menu", |ui| {
+                let ext_title = if self.packaged { t!("settings-extensions-store") } else { t!("settings-extensions") };
+                let ext_hint = if self.packaged {
+                    t!("settings-extensions-store-hint")
+                } else {
+                    t!("settings-extensions-hint")
+                };
+                section(ui, &ext_title, |ui| {
                     let edit = egui::TextEdit::multiline(&mut self.ext_text).desired_rows(2).desired_width(f32::INFINITY);
                     if ui.add(edit).changed() {
                         self.cfg.extensions = self
@@ -633,36 +655,50 @@ impl App {
                             .filter(|e| !e.is_empty())
                             .collect();
                     }
-                    hint(ui, "Separadas por vírgula. Também definem o que entra ao arrastar uma pasta.");
+                    hint(ui, &ext_hint);
                 });
 
-                section(ui, "ffmpeg", |ui| {
+                section(ui, &t!("settings-ffmpeg"), |ui| {
                     match &self.tools {
                         Some(t) => {
-                            ui.label(RichText::new(format!("● Encontrado: {}", t.ffmpeg.display())).color(theme::OK));
+                            ui.label(RichText::new(t!("settings-ffmpeg-found", path => t.ffmpeg.display())).color(theme::OK));
                         }
                         None => {
-                            ui.label(RichText::new("● Não encontrado").color(theme::ERR));
+                            ui.label(RichText::new(t!("settings-ffmpeg-missing")).color(theme::ERR));
                         }
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("Procurar…").clicked() {
-                            if let Some(dir) = rfd::FileDialog::new().set_title("Pasta do ffmpeg").pick_folder() {
+                        if ui.button(t!("browse")).clicked() {
+                            if let Some(dir) = rfd::FileDialog::new().set_title(t!("settings-ffmpeg-folder")).pick_folder() {
                                 self.cfg.ffmpeg_dir = dir.display().to_string();
                             }
                         }
                         ui.add(
                             egui::TextEdit::singleline(&mut self.cfg.ffmpeg_dir)
-                                .hint_text("Automático (ao lado do app ou no PATH)")
+                                .hint_text(t!("settings-ffmpeg-auto"))
                                 .desired_width(f32::INFINITY),
                         );
                     });
                 });
 
-                section(ui, "Comportamento", |ui| {
-                    ui.checkbox(&mut self.cfg.close_when_done, "Fechar a janela rápida quando terminar sem erros");
+                section(ui, &t!("settings-language"), |ui| {
+                    let before = self.cfg.language;
+                    egui::ComboBox::from_id_salt("language").width(220.0).selected_text(self.cfg.language.label()).show_ui(ui, |ui| {
+                        for lang in Language::ALL {
+                            ui.selectable_value(&mut self.cfg.language, lang, lang.label());
+                        }
+                    });
+                    if self.cfg.language != before {
+                        // Troca na hora; o menu de botão direito acompanha ao salvar.
+                        crate::i18n::init(self.cfg.language);
+                        self.cfg.relocalize_factory_names();
+                    }
+                });
+
+                section(ui, &t!("settings-behavior"), |ui| {
+                    ui.checkbox(&mut self.cfg.close_when_done, t!("settings-close-when-done"));
                     ui.horizontal(|ui| {
-                        ui.label("Preset padrão da janela");
+                        ui.label(t!("settings-default-preset"));
                         let name = self.cfg.fallback_preset().map(|p| p.name.clone()).unwrap_or_default();
                         egui::ComboBox::from_id_salt("default_preset").width(190.0).selected_text(name).show_ui(ui, |ui| {
                             for p in &self.cfg.presets {
@@ -672,7 +708,7 @@ impl App {
                     });
                 });
 
-                hint(ui, &format!("Configuração: {}", Config::path().display()));
+                hint(ui, &t!("settings-config-path", path => Config::path().display()));
             });
         });
     }
@@ -695,6 +731,14 @@ impl eframe::App for App {
                 Tab::Queue => self.queue_tab(ui, &jobs),
                 Tab::Presets => self.presets_tab(ui),
                 Tab::Settings => self.settings_tab(ui),
+                Tab::About => {
+                    egui::CentralPanel::default().frame(page_frame()).show(ui, |ui| {
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                            ui.set_max_width(640.0);
+                            self.about.ui(ui);
+                        });
+                    });
+                }
             }
         }
 
@@ -712,7 +756,7 @@ impl eframe::App for App {
             painter.text(
                 screen.center(),
                 egui::Align2::CENTER_CENTER,
-                "Solte para adicionar à fila",
+                t!("drop-overlay"),
                 egui::FontId::new(20.0, theme::semibold()),
                 theme::TEXT,
             );
@@ -746,7 +790,7 @@ fn form(ui: &mut egui::Ui, id: &str, title: &str, add: impl FnOnce(&mut egui::Ui
     });
 }
 
-fn enum_combo<T: Copy + PartialEq>(ui: &mut egui::Ui, id: &str, value: &mut T, options: &[T], label: fn(T) -> &'static str) {
+fn enum_combo<T: Copy + PartialEq>(ui: &mut egui::Ui, id: &str, value: &mut T, options: &[T], label: fn(T) -> String) {
     egui::ComboBox::from_id_salt(id).width(250.0).selected_text(label(*value)).show_ui(ui, |ui| {
         for &option in options {
             ui.selectable_value(value, option, label(option));
@@ -755,10 +799,12 @@ fn enum_combo<T: Copy + PartialEq>(ui: &mut egui::Ui, id: &str, value: &mut T, o
 }
 
 fn num_combo(ui: &mut egui::Ui, id: &str, value: &mut u32, options: &[(u32, &str)]) {
-    let current = options.iter().find(|(v, _)| v == value).map(|(_, l)| l.to_string()).unwrap_or_else(|| value.to_string());
+    // "Original" é o único rótulo que muda com o idioma.
+    let show = |label: &str| if label == "Original" { t!("original") } else { label.to_string() };
+    let current = options.iter().find(|(v, _)| v == value).map(|(_, l)| show(l)).unwrap_or_else(|| value.to_string());
     egui::ComboBox::from_id_salt(id).width(250.0).selected_text(current).show_ui(ui, |ui| {
         for (v, label) in options {
-            ui.selectable_value(value, *v, *label);
+            ui.selectable_value(value, *v, show(label));
         }
     });
 }
@@ -778,96 +824,96 @@ const FRAME_RATES: [(u32, &str); 8] =
 fn preset_editor(ui: &mut egui::Ui, p: &mut Preset, encoders: &HashSet<String>) {
     ui.spacing_mut().item_spacing.y = 10.0;
 
-    form(ui, "f_general", "Geral", |ui| {
-        row(ui, "Nome", |ui| {
+    form(ui, "f_general", &t!("editor-general"), |ui| {
+        row(ui, &t!("editor-name"), |ui| {
             ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(262.0));
         });
-        row(ui, "Formato", |ui| {
+        row(ui, &t!("editor-format"), |ui| {
             let before = p.container;
             enum_combo(ui, "container", &mut p.container, &Container::ALL, Container::label);
             if p.container != before {
                 p.normalize();
             }
         });
-        row(ui, "Menu contextual", |ui| {
-            ui.checkbox(&mut p.in_menu, "Mostrar no botão direito");
+        row(ui, &t!("editor-context-menu"), |ui| {
+            ui.checkbox(&mut p.in_menu, t!("editor-show-in-menu"));
         });
     });
 
     if p.container == Container::Gif {
-        form(ui, "f_gif", "GIF", |ui| {
-            row(ui, "Tamanho máximo", |ui| num_combo(ui, "res", &mut p.max_short_side, &RESOLUTIONS[..]));
-            row(ui, "FPS máximo", |ui| num_combo(ui, "fps", &mut p.max_fps, &FRAME_RATES[..]));
+        form(ui, "f_gif", &t!("editor-gif"), |ui| {
+            row(ui, &t!("editor-max-size"), |ui| num_combo(ui, "res", &mut p.max_short_side, &RESOLUTIONS[..]));
+            row(ui, &t!("editor-max-fps"), |ui| num_combo(ui, "fps", &mut p.max_fps, &FRAME_RATES[..]));
         });
     } else if p.has_video_settings() {
-        form(ui, "f_video", "Vídeo", |ui| {
-            row(ui, "Codec", |ui| enum_combo(ui, "vcodec", &mut p.video, p.container.video_codecs(), VideoCodec::label));
+        form(ui, "f_video", &t!("editor-video"), |ui| {
+            row(ui, &t!("editor-codec"), |ui| enum_combo(ui, "vcodec", &mut p.video, p.container.video_codecs(), VideoCodec::label));
             if p.video == VideoCodec::Copy {
                 return;
             }
             let uses_hw = !matches!(p.video, VideoCodec::Vp9 | VideoCodec::Prores);
             if uses_hw {
-                row(ui, "Encoder", |ui| enum_combo(ui, "hw", &mut p.hw, &Hw::ALL, Hw::label));
+                row(ui, &t!("editor-encoder"), |ui| enum_combo(ui, "hw", &mut p.hw, &Hw::ALL, Hw::label));
             }
             if p.video != VideoCodec::Prores {
-                row(ui, "Controle de taxa", |ui| enum_combo(ui, "rate", &mut p.rate_mode, &RateMode::ALL, RateMode::label));
+                row(ui, &t!("editor-rate-control"), |ui| enum_combo(ui, "rate", &mut p.rate_mode, &RateMode::ALL, RateMode::label));
                 match p.rate_mode {
-                    RateMode::Quality => row(ui, "Qualidade", |ui| {
+                    RateMode::Quality => row(ui, &t!("editor-quality"), |ui| {
                         ui.add(egui::DragValue::new(&mut p.crf).range(0..=63).speed(0.2));
-                        hint(ui, "menor = melhor · H.264 18–28 · HEVC 22–30 · AV1/VP9 28–40");
+                        hint(ui, &t!("editor-quality-hint"));
                     }),
-                    RateMode::Bitrate => row(ui, "Bitrate de vídeo", |ui| {
+                    RateMode::Bitrate => row(ui, &t!("editor-video-bitrate"), |ui| {
                         ui.add(egui::DragValue::new(&mut p.video_kbps).range(100..=200_000).speed(25.0).suffix(" kbps"));
                         hint(ui, &crate::config::fmt_kbps(p.video_kbps));
                     }),
-                    RateMode::TargetSize => row(ui, "Tamanho do arquivo", |ui| {
+                    RateMode::TargetSize => row(ui, &t!("editor-file-size"), |ui| {
                         ui.add(egui::DragValue::new(&mut p.target_mb).range(1..=100_000).speed(0.5).suffix(" MB"));
-                        hint(ui, "aproximado (uma passada)");
+                        hint(ui, &t!("editor-file-size-hint"));
                     }),
                 }
-                row(ui, "Velocidade", |ui| enum_combo(ui, "speed", &mut p.speed, &Speed::ALL, Speed::label));
+                row(ui, &t!("editor-speed"), |ui| enum_combo(ui, "speed", &mut p.speed, &Speed::ALL, Speed::label));
             }
-            row(ui, "Resolução máxima", |ui| num_combo(ui, "res", &mut p.max_short_side, &RESOLUTIONS[..]));
-            row(ui, "FPS máximo", |ui| num_combo(ui, "fps", &mut p.max_fps, &FRAME_RATES[..]));
+            row(ui, &t!("editor-max-resolution"), |ui| num_combo(ui, "res", &mut p.max_short_side, &RESOLUTIONS[..]));
+            row(ui, &t!("editor-max-fps"), |ui| num_combo(ui, "fps", &mut p.max_fps, &FRAME_RATES[..]));
         });
     }
 
     if p.container != Container::Gif {
-        form(ui, "f_audio", "Áudio", |ui| {
-            row(ui, "Codec", |ui| enum_combo(ui, "acodec", &mut p.audio, p.container.audio_codecs(), AudioCodec::label));
+        form(ui, "f_audio", &t!("editor-audio"), |ui| {
+            row(ui, &t!("editor-codec"), |ui| enum_combo(ui, "acodec", &mut p.audio, p.container.audio_codecs(), AudioCodec::label));
             if matches!(p.audio, AudioCodec::Aac | AudioCodec::Opus | AudioCodec::Mp3) {
-                row(ui, "Bitrate", |ui| {
+                row(ui, &t!("editor-bitrate"), |ui| {
                     ui.add(egui::DragValue::new(&mut p.audio_kbps).range(16..=512).speed(1.0).suffix(" kbps"));
                 });
             }
         });
     }
 
-    form(ui, "f_output", "Saída", |ui| {
-        row(ui, "Sufixo do nome", |ui| {
+    form(ui, "f_output", &t!("editor-output"), |ui| {
+        row(ui, &t!("editor-suffix"), |ui| {
             ui.add(egui::TextEdit::singleline(&mut p.suffix).desired_width(262.0));
         });
-        row(ui, "Pasta", |ui| {
+        row(ui, &t!("editor-folder"), |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut p.output_dir)
-                    .hint_text("Mesma pasta do original")
+                    .hint_text(t!("editor-folder-hint"))
                     .desired_width(262.0),
             );
-            if ui.button("Procurar…").clicked() {
+            if ui.button(t!("browse")).clicked() {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                     p.output_dir = dir.display().to_string();
                 }
             }
         });
         row(ui, "", |ui| {
-            hint(ui, &format!("vídeo{}.{}  ·  um nome de subpasta também funciona", p.suffix.trim(), p.container.ext()));
+            hint(ui, &t!("editor-output-example", suffix => p.suffix.trim(), ext => p.container.ext()));
         });
-        row(ui, "Args extras do ffmpeg", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut p.extra_args).hint_text("opcional").desired_width(262.0));
+        row(ui, &t!("editor-extra-args"), |ui| {
+            ui.add(egui::TextEdit::singleline(&mut p.extra_args).hint_text(t!("editor-optional")).desired_width(262.0));
         });
     });
 
-    section(ui, "Comando", |ui| {
+    section(ui, &t!("editor-command"), |ui| {
         let cmd = ffmpeg::preview(p, encoders);
         ui.add(egui::Label::new(RichText::new(cmd).monospace().size(12.0).color(theme::MUTED)).wrap());
     });
@@ -883,7 +929,7 @@ fn bar_frame() -> egui::Frame {
     egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(16, 10))
 }
 
-fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+pub(crate) fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let visuals = &mut ui.visuals_mut().widgets;
     let saved = (visuals.hovered.weak_bg_fill, visuals.active.weak_bg_fill);
     visuals.hovered.weak_bg_fill = theme::ACCENT_HOVER;
@@ -915,21 +961,21 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 fn status_line(job: &Job) -> (String, Color32) {
     let preset = &job.preset.name;
     match job.state {
-        JobState::Idle => (format!("{} · pronto para encodar", fmt_size(job.in_bytes)), theme::MUTED),
-        JobState::Queued => (format!("{preset} · na fila"), theme::MUTED),
+        JobState::Idle => (t!("status-ready", size => fmt_size(job.in_bytes)), theme::MUTED),
+        JobState::Queued => (t!("status-queued", preset => preset), theme::MUTED),
         JobState::Running => {
             let mut text = match job.fraction {
                 Some(f) => {
-                    let mut t = format!("{preset} · {:.0}%", f * 100.0);
+                    let mut t = t!("status-progress", preset => preset, percent => format!("{:.0}", f * 100.0));
                     if job.speed > 0.0 {
-                        t.push_str(&format!(" · {:.1}x", job.speed));
+                        t.push_str(&format!(" · {}", t!("status-speed", speed => format!("{:.1}", job.speed))));
                     }
                     if let Some(eta) = job.eta_secs {
-                        t.push_str(&format!(" · faltam {}", fmt_time(eta)));
+                        t.push_str(&format!(" · {}", t!("status-eta", time => fmt_time(eta))));
                     }
                     t
                 }
-                None => format!("{preset} · encodando…"),
+                None => t!("status-encoding", preset => preset),
             };
             if let Some(note) = &job.note {
                 text.push_str(&format!(" · {note}"));
@@ -937,7 +983,7 @@ fn status_line(job: &Job) -> (String, Color32) {
             (text, theme::TEXT)
         }
         JobState::Done => {
-            let mut text = format!("{preset} · {} → {}", fmt_size(job.in_bytes), fmt_size(job.out_bytes));
+            let mut text = t!("status-done", preset => preset, from => fmt_size(job.in_bytes), to => fmt_size(job.out_bytes));
             if job.in_bytes > 0 && job.out_bytes > 0 {
                 let delta = (job.out_bytes as f64 / job.in_bytes as f64 - 1.0) * 100.0;
                 text.push_str(&format!(" ({}{:.0}%)", if delta > 0.0 { "+" } else { "−" }, delta.abs()));
@@ -945,10 +991,10 @@ fn status_line(job: &Job) -> (String, Color32) {
             (text, theme::OK)
         }
         JobState::Failed => {
-            let last = job.error.as_deref().and_then(|e| e.lines().last()).unwrap_or("erro desconhecido");
-            (format!("Erro: {last}"), theme::ERR)
+            let last = job.error.as_deref().and_then(|e| e.lines().last()).map(String::from).unwrap_or_else(|| t!("status-unknown-error"));
+            (t!("status-error", message => last), theme::ERR)
         }
-        JobState::Cancelled => (format!("{preset} · cancelado"), theme::MUTED),
+        JobState::Cancelled => (t!("status-cancelled", preset => preset), theme::MUTED),
     }
 }
 

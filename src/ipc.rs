@@ -38,12 +38,12 @@ fn pipe_name() -> String {
         .chars()
         .filter(|c| c.is_alphanumeric())
         .collect();
-    format!(r"\\.\pipe\QuickEncoder.{user}")
+    format!(r"\\.\pipe\MariEncoder.{user}")
 }
 
 /// `true` se esta é a primeira instância na sessão. O mutex vive até o processo sair.
 pub fn acquire() -> bool {
-    let name = wide("Local\\QuickEncoder.SingleInstance");
+    let name = wide("Local\\MariEncoder.SingleInstance");
     unsafe {
         let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
         !handle.is_null() && GetLastError() != ERROR_ALREADY_EXISTS

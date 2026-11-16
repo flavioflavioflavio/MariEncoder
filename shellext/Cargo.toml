@@ -1,16 +1,19 @@
 [package]
-name = "quickencoder_menu"
-version = "0.1.0"
+name = "mari-encoder-menu"
+version = "1.0.0"
 edition = "2024"
-description = "Extensão do menu de contexto do Windows 11 para o QuickEncoder (IExplorerCommand)"
+description = "Menu de botão direito do Windows (IExplorerCommand) do Mari Encoder"
+license = "GPL-3.0-or-later"
 
 [lib]
-crate-type = ["cdylib"]
+name = "MariEncoderMenu"
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 serde_json = "1"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_UI_Shell",

@@ -1,8 +1,8 @@
 //! Diagnóstico: conversa com a extensão do menu do Windows 11 do mesmo jeito que o
 //! Explorer (via COM, fora do processo) e lista o que ela devolve.
 //!
-//!   cargo run -p quickencoder_menu --example probe
-//!   cargo run -p quickencoder_menu --example probe -- "WhatsApp" C:\videos\clipe.mp4
+//!   cargo run -p mari-encoder-menu --example probe
+//!   cargo run -p mari-encoder-menu --example probe -- "WhatsApp" C:\videos\clipe.mp4
 //!
 //! Com dois argumentos, invoca o item com aquele título para o arquivo dado.
 
@@ -14,7 +14,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::{GUID, HSTRING, PWSTR, Result};
 
-const CLSID_MENU: GUID = GUID::from_u128(0x7b3e5c1a_9d42_4f86_a1e7_2c5d8b946f30);
+use MariEncoderMenu::brand;
 
 fn text(value: Result<PWSTR>) -> String {
     match value {
@@ -31,7 +31,20 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-        let root: IExplorerCommand = CoCreateInstance(&CLSID_MENU, None, CLSCTX_LOCAL_SERVER)?;
+        // Tenta a classe da Store e depois a do pacote esparso (versão do GitHub).
+        let mut root: Option<IExplorerCommand> = None;
+        for (label, id) in [("Store", brand::CLSID_STORE), ("GitHub", brand::CLSID_DEV)] {
+            let clsid = GUID::try_from(id).expect("CLSID válido");
+            if let Ok(cmd) = CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER) {
+                println!("classe registrada: {label} ({id})");
+                root = Some(cmd);
+                break;
+            }
+        }
+        let Some(root) = root else {
+            println!("nenhuma classe do menu registrada (instale pelo app ou pelo pacote da Store)");
+            return Ok(());
+        };
         println!("raiz: \"{}\"  flags={:#x}  ícone={}", text(root.GetTitle(None)), root.GetFlags()?, text(root.GetIcon(None)));
 
         println!("origem: {}", text(root.GetToolTip(None)));

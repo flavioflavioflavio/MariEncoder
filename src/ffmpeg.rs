@@ -148,13 +148,19 @@ fn scale_filter(short_side: u32) -> String {
     )
 }
 
-fn video_encoder(p: &Preset, hw: Hw, encoders: &HashSet<String>) -> &'static str {
+/// Encoder do ffmpeg para o codec e o hardware escolhidos.
+///
+/// "Windows (automático)" usa os encoders H.264/HEVC do próprio Windows (Media
+/// Foundation): o app não distribui x264/x265, e a licença de patente desses codecs
+/// fica com a Microsoft e com o fabricante da placa de vídeo. AV1 e VP9 são livres
+/// de royalties e rodam por software (SVT-AV1 / libvpx).
+pub fn video_encoder(p: &Preset, hw: Hw, encoders: &HashSet<String>) -> &'static str {
     match (p.video, hw) {
-        (VideoCodec::H264, Hw::Cpu) => "libx264",
+        (VideoCodec::H264, Hw::Cpu) => "h264_mf",
         (VideoCodec::H264, Hw::Nvidia) => "h264_nvenc",
         (VideoCodec::H264, Hw::Intel) => "h264_qsv",
         (VideoCodec::H264, Hw::Amd) => "h264_amf",
-        (VideoCodec::H265, Hw::Cpu) => "libx265",
+        (VideoCodec::H265, Hw::Cpu) => "hevc_mf",
         (VideoCodec::H265, Hw::Nvidia) => "hevc_nvenc",
         (VideoCodec::H265, Hw::Intel) => "hevc_qsv",
         (VideoCodec::H265, Hw::Amd) => "hevc_amf",
@@ -172,6 +178,49 @@ fn video_encoder(p: &Preset, hw: Hw, encoders: &HashSet<String>) -> &'static str
         (VideoCodec::Prores, _) => "prores_ks",
         (VideoCodec::Copy, _) => "copy",
     }
+}
+
+/// Converte a escala de qualidade dos presets (estilo CRF: menor = melhor) para a do
+/// Media Foundation (0–100, maior = melhor). Calibrado pelo bitrate contra o x264
+/// `-preset medium`. Por software: CRF 18 ≈ 78, 23 ≈ 55, 28 ≈ 35. Por GPU (o MFT do
+/// fabricante tem outra escala): CRF 18 ≈ 85, 23 ≈ 58, 28 ≈ 35.
+fn mf_quality(crf: u32, hardware: bool) -> u32 {
+    let delta = crf as f32 - 23.0;
+    let q = if hardware { 58.0 - 5.0 * delta } else { 55.0 - 4.3 * delta };
+    q.round().clamp(1.0, 100.0) as u32
+}
+
+/// Caminho de encode tentado. A fila começa pelo pedido no preset e recua: GPU do
+/// fabricante → encoder do Windows por GPU → encoder do Windows por software.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Route {
+    /// Ignora a GPU escolhida no preset e usa o encoder do Windows.
+    pub force_cpu: bool,
+    /// Pede ao encoder H.264 do Windows a versão de hardware.
+    pub mf_hw: bool,
+}
+
+impl Route {
+    pub const PRESET: Route = Route { force_cpu: false, mf_hw: true };
+}
+
+/// Sequência de tentativas para o preset (a primeira que funcionar vale).
+pub fn routes(p: &Preset, encoders: &HashSet<String>) -> Vec<Route> {
+    if !p.has_video_settings() || matches!(p.video, VideoCodec::Copy | VideoCodec::Vp9 | VideoCodec::Prores) {
+        return vec![Route::PRESET];
+    }
+    let mut out = Vec::new();
+    if p.hw != Hw::Cpu {
+        out.push(Route::PRESET);
+    }
+    let windows = Route { force_cpu: true, mf_hw: true };
+    if !out.contains(&windows) {
+        out.push(windows);
+    }
+    if video_encoder(p, Hw::Cpu, encoders) == "h264_mf" {
+        out.push(Route { force_cpu: true, mf_hw: false });
+    }
+    out
 }
 
 /// Bitrate de vídeo (kbps) quando o preset usa bitrate fixo ou tamanho-alvo.
@@ -193,7 +242,7 @@ fn target_kbps(p: &Preset, duration: Option<f64>) -> Option<u32> {
     }
 }
 
-fn push_video(p: &Preset, duration: Option<f64>, force_cpu: bool, encoders: &HashSet<String>, a: &mut Vec<String>) {
+fn push_video(p: &Preset, duration: Option<f64>, route: Route, encoders: &HashSet<String>, a: &mut Vec<String>) {
     if p.video == VideoCodec::Copy {
         a.extend(["-c:v".into(), "copy".into()]);
         return;
@@ -209,7 +258,7 @@ fn push_video(p: &Preset, duration: Option<f64>, force_cpu: bool, encoders: &Has
         a.extend(["-vf".into(), vf.join(",")]);
     }
 
-    let hw = if force_cpu { Hw::Cpu } else { p.hw };
+    let hw = if route.force_cpu { Hw::Cpu } else { p.hw };
     let enc = video_encoder(p, hw, encoders);
     a.extend(["-c:v".into(), enc.into()]);
 
@@ -225,11 +274,19 @@ fn push_video(p: &Preset, duration: Option<f64>, force_cpu: bool, encoders: &Has
     };
 
     match enc {
-        "libx264" | "libx265" => {
-            ext(a, &["-preset", match p.speed { Speed::Fast => "fast", Speed::Medium => "medium", Speed::Slow => "slow" }]);
+        "h264_mf" | "hevc_mf" => {
+            // O Windows só tem encoder HEVC por hardware (placa de vídeo). No H.264 o
+            // de hardware é tentado primeiro: ele respeita melhor o bitrate pedido.
+            let mf_hw = enc == "hevc_mf" || route.mf_hw;
+            if mf_hw {
+                ext(a, &["-hw_encoding", "1"]);
+            }
             match kbps {
-                Some(k) => a.extend(bitrate(k)),
-                None => ext(a, &["-crf", &crf]),
+                Some(k) => {
+                    ext(a, &["-rate_control", if strict { "cbr" } else { "u_vbr" }]);
+                    a.extend(["-b:v".into(), format!("{k}k")]);
+                }
+                None => ext(a, &["-rate_control", "quality", "-quality", &mf_quality(p.crf, mf_hw).to_string()]),
             }
         }
         "libsvtav1" => {
@@ -274,17 +331,28 @@ fn push_video(p: &Preset, duration: Option<f64>, force_cpu: bool, encoders: &Has
         _ => {}
     }
 
-    if enc != "prores_ks" {
-        a.extend(["-pix_fmt".into(), "yuv420p".into()]);
+    let pix_fmt = match enc {
+        "prores_ks" => None,
+        // Encoders de hardware e do Windows trabalham em NV12.
+        e if e.ends_with("_mf") || e.ends_with("_qsv") => Some("nv12"),
+        _ => Some("yuv420p"),
+    };
+    if let Some(fmt) = pix_fmt {
+        a.extend(["-pix_fmt".into(), fmt.into()]);
     }
     if p.video == VideoCodec::H265 && matches!(p.container, Container::Mp4 | Container::Mov) {
         a.extend(["-tag:v".into(), "hvc1".into()]);
     }
 }
 
-fn push_audio(p: &Preset, a: &mut Vec<String>) {
+fn push_audio(p: &Preset, encoders: &HashSet<String>, a: &mut Vec<String>) {
     let kbps = format!("{}k", p.audio_kbps.clamp(16, 512));
+    // AAC pelo encoder do Windows (a licença de patente fica com a Microsoft). Ele só
+    // aceita 96, 128, 160 ou 192 kbps.
+    let aac_mf_kbps = format!("{}k", [96, 128, 160, 192].into_iter().min_by_key(|k: &u32| k.abs_diff(p.audio_kbps)).unwrap_or(128));
+    let use_aac_mf = encoders.contains("aac_mf") || encoders.is_empty();
     let items: Vec<&str> = match p.audio {
+        AudioCodec::Aac if use_aac_mf => vec!["-c:a", "aac_mf", "-b:a", &aac_mf_kbps],
         AudioCodec::Aac => vec!["-c:a", "aac", "-b:a", &kbps],
         AudioCodec::Opus => vec!["-c:a", "libopus", "-b:a", &kbps],
         AudioCodec::Mp3 => vec!["-c:a", "libmp3lame", "-b:a", &kbps],
@@ -326,7 +394,7 @@ fn split_args(s: &str) -> Vec<String> {
 }
 
 /// Argumentos entre a entrada e a saída (codec, filtros, taxa...).
-pub fn encode_args(p: &Preset, duration: Option<f64>, force_cpu: bool, encoders: &HashSet<String>) -> Vec<String> {
+pub fn encode_args(p: &Preset, duration: Option<f64>, route: Route, encoders: &HashSet<String>) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
     match p.container {
         Container::Gif => {
@@ -345,11 +413,11 @@ pub fn encode_args(p: &Preset, duration: Option<f64>, force_cpu: bool, encoders:
         }
         c if c.audio_only() => {
             a.push("-vn".into());
-            push_audio(p, &mut a);
+            push_audio(p, encoders, &mut a);
         }
         _ => {
-            push_video(p, duration, force_cpu, encoders, &mut a);
-            push_audio(p, &mut a);
+            push_video(p, duration, route, encoders, &mut a);
+            push_audio(p, encoders, &mut a);
             a.extend(["-map_metadata".into(), "0".into()]);
         }
     }
@@ -366,12 +434,12 @@ pub fn build_args(
     input: &Path,
     output: &Path,
     duration: Option<f64>,
-    force_cpu: bool,
+    route: Route,
     encoders: &HashSet<String>,
 ) -> Vec<OsString> {
     let mut a: Vec<OsString> = ["-hide_banner", "-y", "-nostdin", "-i"].iter().map(OsString::from).collect();
     a.push(input.into());
-    a.extend(encode_args(p, duration, force_cpu, encoders).into_iter().map(OsString::from));
+    a.extend(encode_args(p, duration, route, encoders).into_iter().map(OsString::from));
     a.extend(["-progress", "pipe:1", "-nostats"].iter().map(OsString::from));
     a.push(output.into());
     a
@@ -379,7 +447,7 @@ pub fn build_args(
 
 /// Comando legível para mostrar no editor de presets.
 pub fn preview(p: &Preset, encoders: &HashSet<String>) -> String {
-    let args = encode_args(p, None, false, encoders);
+    let args = encode_args(p, None, Route::PRESET, encoders);
     let mid: Vec<String> = args
         .iter()
         .map(|x| if x.contains([' ', '\'', ';', '[']) { format!("\"{x}\"") } else { x.clone() })
@@ -419,7 +487,7 @@ pub fn run(
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(CREATE_NO_WINDOW);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return Outcome::Failed(format!("Não foi possível iniciar o ffmpeg: {e}")),
+        Err(e) => return Outcome::Failed(crate::t!("err-ffmpeg-start", error => e)),
     };
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -481,10 +549,61 @@ pub fn run(
         _ => {
             let log: Vec<String> = tail.lock().unwrap().iter().cloned().collect();
             if log.is_empty() {
-                Outcome::Failed("O ffmpeg terminou com erro.".into())
+                Outcome::Failed(crate::t!("err-ffmpeg-failed"))
             } else {
                 Outcome::Failed(log.join("\n"))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn all_encoders() -> HashSet<String> {
+        ["h264_mf", "hevc_mf", "aac_mf", "libsvtav1", "libaom-av1", "libvpx-vp9", "h264_nvenc", "libopus", "libmp3lame"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// A versão da Store não pode depender de x264/x265 (GPL e patentes).
+    #[test]
+    fn default_presets_never_use_x264_or_x265() {
+        let enc = all_encoders();
+        for p in Config::default().presets {
+            for route in routes(&p, &enc) {
+                let args = encode_args(&p, Some(60.0), route, &enc).join(" ");
+                assert!(!args.contains("libx264") && !args.contains("libx265"), "{}: {args}", p.name);
+            }
+        }
+    }
+
+    #[test]
+    fn windows_h264_tries_gpu_then_software() {
+        let p = Config::default().preset("whatsapp").unwrap().clone();
+        let r = routes(&p, &all_encoders());
+        assert_eq!(r, vec![Route { force_cpu: true, mf_hw: true }, Route { force_cpu: true, mf_hw: false }]);
+        let mut nvidia = p.clone();
+        nvidia.hw = Hw::Nvidia;
+        assert_eq!(routes(&nvidia, &all_encoders())[0], Route::PRESET);
+    }
+
+    #[test]
+    fn mf_quality_follows_crf_direction() {
+        assert!(mf_quality(18, false) > mf_quality(23, false));
+        assert!(mf_quality(28, true) < mf_quality(23, true));
+        assert_eq!(mf_quality(23, false), 55);
+        assert_eq!(mf_quality(23, true), 58);
+    }
+
+    #[test]
+    fn aac_uses_windows_encoder_with_supported_bitrate() {
+        let mut p = Config::default().preset("whatsapp").unwrap().clone();
+        p.audio_kbps = 100;
+        let args = encode_args(&p, None, Route::PRESET, &all_encoders()).join(" ");
+        assert!(args.contains("-c:a aac_mf -b:a 96k"), "{args}");
     }
 }

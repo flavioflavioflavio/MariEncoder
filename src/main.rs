@@ -1,6 +1,13 @@
 #![windows_subsystem = "windows"]
 
+#[macro_use]
+mod i18n;
+mod about;
 mod app;
+#[allow(dead_code)]
+mod brand {
+    include!("../shared/brand.rs");
+}
 mod config;
 mod ffmpeg;
 mod ipc;
@@ -11,13 +18,16 @@ mod theme;
 use std::path::PathBuf;
 
 /// Uso:
-///   quickencoder                         abre a janela de batch
-///   quickencoder <arquivos>              abre com os arquivos na lista
-///   quickencoder --add <arquivos>        idem (usado pelo menu contextual)
-///   quickencoder --preset <id> <arquivos> encoda direto com o preset
-///   quickencoder --presets | --settings  abre direto na aba indicada
-///   quickencoder --install | --uninstall registra/remove o menu contextual
+///   MariEncoder                          abre a janela de batch
+///   MariEncoder <arquivos>               abre com os arquivos na lista
+///   MariEncoder --add <arquivos>         idem (usado pelo menu contextual)
+///   MariEncoder --preset <id> <arquivos> encoda direto com o preset
+///   MariEncoder --presets | --settings | --about  abre direto na aba indicada
+///   MariEncoder --install | --uninstall  registra/remove o menu contextual
+///                                        (sem efeito no pacote da Store)
 fn main() {
+    // Idioma do Windows até ler o config (que pode escolher outro).
+    i18n::init(i18n::Language::System);
     let mut msg = ipc::Msg::default();
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -29,8 +39,14 @@ fn main() {
             Some("--add") => {}
             Some("--presets") => msg.tab = Some("presets".into()),
             Some("--settings") => msg.tab = Some("settings".into()),
+            Some("--about") => msg.tab = Some("about".into()),
+            Some("--install") | Some("--uninstall") if shell::is_packaged() => {
+                // No pacote da Store o menu vem do manifesto.
+                std::process::exit(0);
+            }
             Some("--install") => {
                 let cfg = config::Config::load();
+                i18n::init(cfg.language);
                 if !config::Config::path().exists() {
                     // O menu do Windows 11 lê os presets deste arquivo.
                     let _ = cfg.save();

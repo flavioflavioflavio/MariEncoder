@@ -11,8 +11,9 @@ pub const CONTROL_HOVER: Color32 = Color32::from_rgb(0x36, 0x36, 0x40);
 pub const BORDER: Color32 = Color32::from_rgb(0x30, 0x30, 0x39);
 pub const TEXT: Color32 = Color32::from_rgb(0xec, 0xec, 0xf1);
 pub const MUTED: Color32 = Color32::from_rgb(0x8f, 0x8f, 0x9c);
-pub const ACCENT: Color32 = Color32::from_rgb(0xff, 0x6b, 0x2c);
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xff, 0x82, 0x4a);
+/// Laranja da família Mari (#F7941D, a cor de destaque da paleta do MariPDF).
+pub const ACCENT: Color32 = Color32::from_rgb(0xf7, 0x94, 0x1d);
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xfb, 0xa9, 0x40);
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x1a, 0x0d, 0x06);
 pub const OK: Color32 = Color32::from_rgb(0x3d, 0xd6, 0x8c);
 pub const ERR: Color32 = Color32::from_rgb(0xff, 0x62, 0x62);

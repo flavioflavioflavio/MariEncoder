@@ -1,6 +1,6 @@
 //! Fila de encodes: uma thread de trabalho roda um job por vez e publica o progresso.
 
-use crate::config::{Hw, Preset, VideoCodec};
+use crate::config::{Hw, Preset};
 use crate::ffmpeg::{self, Outcome, Tools};
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -187,7 +187,7 @@ impl Queue {
 
             let (state, error) = match &tools {
                 Some(tools) => self.encode(&job, tools, &repaint),
-                None => (JobState::Failed, Some("ffmpeg não encontrado. Indique a pasta em Ajustes.".to_string())),
+                None => (JobState::Failed, Some(crate::t!("err-ffmpeg-missing"))),
             };
             self.with_job(job.id, |j| {
                 j.state = state;
@@ -206,21 +206,19 @@ impl Queue {
 
     fn encode(&self, job: &Job, tools: &Tools, repaint: &dyn Fn()) -> (JobState, Option<String>) {
         if !job.input.is_file() {
-            return (JobState::Failed, Some("Arquivo de entrada não encontrado.".into()));
+            return (JobState::Failed, Some(crate::t!("err-input-missing")));
         }
         let output = match output_path(&job.input, &job.preset) {
             Ok(p) => p,
-            Err(e) => return (JobState::Failed, Some(format!("Não foi possível criar a pasta de saída: {e}"))),
+            Err(e) => return (JobState::Failed, Some(crate::t!("err-output-folder", error => e))),
         };
         self.with_job(job.id, |j| j.output = Some(output.clone()));
         let duration = ffmpeg::probe_duration(tools, &job.input);
 
-        let uses_gpu = job.preset.hw != Hw::Cpu
-            && job.preset.has_video_settings()
-            && !matches!(job.preset.video, VideoCodec::Copy | VideoCodec::Vp9 | VideoCodec::Prores);
-        let mut force_cpu = false;
-        loop {
-            let args = ffmpeg::build_args(&job.preset, &job.input, &output, duration, force_cpu, &tools.encoders);
+        let routes = ffmpeg::routes(&job.preset, &tools.encoders);
+        for (attempt, route) in routes.iter().copied().enumerate() {
+            let is_last = attempt + 1 == routes.len();
+            let args = ffmpeg::build_args(&job.preset, &job.input, &output, duration, route, &tools.encoders);
             let started = Instant::now();
             let outcome = ffmpeg::run(&tools.ffmpeg, &args, &job.cancel, &job.child, |p| {
                 let fraction = duration.map(|d| (p.out_secs / d).clamp(0.0, 1.0) as f32);
@@ -239,21 +237,37 @@ impl Queue {
                     let _ = std::fs::remove_file(&output);
                     return (JobState::Cancelled, None);
                 }
-                Outcome::Failed(_) if uses_gpu && !force_cpu => {
-                    // Encoder de GPU indisponível nesta máquina: tenta de novo por software.
-                    force_cpu = true;
+                Outcome::Failed(_) if !is_last => {
+                    // Encoder indisponível nesta máquina: recua para o próximo caminho.
+                    let next = routes[attempt + 1];
+                    let note = if !route.force_cpu && next.force_cpu {
+                        Some(crate::t!("note-gpu-fallback"))
+                    } else {
+                        None // troca interna do Windows (GPU → software): não precisa avisar
+                    };
                     self.with_job(job.id, |j| {
-                        j.note = Some("GPU indisponível — encodando pela CPU".into());
+                        if note.is_some() {
+                            j.note = note;
+                        }
                         j.fraction = None;
                     });
                     repaint();
                 }
                 Outcome::Failed(log) => {
                     let _ = std::fs::remove_file(&output);
+                    let hw = if route.force_cpu { Hw::Cpu } else { job.preset.hw };
+                    let enc = ffmpeg::video_encoder(&job.preset, hw, &tools.encoders);
+                    let log = if enc == "hevc_mf" && job.preset.has_video_settings() {
+                        // Última linha é a que aparece na lista.
+                        format!("{log}\n{}", crate::t!("err-hevc-needs-gpu"))
+                    } else {
+                        log
+                    };
                     return (JobState::Failed, Some(log));
                 }
             }
         }
+        (JobState::Failed, Some(crate::t!("err-no-encoder")))
     }
 }
 

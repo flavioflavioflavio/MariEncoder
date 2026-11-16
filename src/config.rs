@@ -1,4 +1,4 @@
-//! Configuração persistida em %APPDATA%\QuickEncoder\config.json: presets e ajustes.
+//! Configuração persistida em %APPDATA%\MariEncoder\config.json: presets e ajustes.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -10,8 +10,13 @@ macro_rules! labeled_enum {
         #[serde(rename_all = "snake_case")]
         pub enum $name { $($var),+ }
         impl $name {
-            pub fn label(self) -> &'static str {
-                match self { $(Self::$var => $label),+ }
+            /// Nome mostrado na interface. Começando com "@", é uma chave do Fluent.
+            pub fn label(self) -> String {
+                let label: &str = match self { $(Self::$var => $label),+ };
+                match label.strip_prefix('@') {
+                    Some(key) => $crate::i18n::get_args(key, &[]),
+                    None => label.to_string(),
+                }
             }
         }
     };
@@ -22,10 +27,10 @@ labeled_enum!(Container {
     Mov => "MOV",
     Mkv => "MKV",
     Webm => "WebM",
-    Gif => "GIF animado",
-    Mp3 => "MP3 (só áudio)",
-    M4a => "M4A (só áudio)",
-    Wav => "WAV (só áudio)",
+    Gif => "@container-gif",
+    Mp3 => "@container-mp3",
+    M4a => "@container-m4a",
+    Wav => "@container-wav",
 });
 
 labeled_enum!(VideoCodec {
@@ -34,35 +39,35 @@ labeled_enum!(VideoCodec {
     Av1 => "AV1",
     Vp9 => "VP9",
     Prores => "ProRes 422 HQ",
-    Copy => "Copiar (sem reencode)",
+    Copy => "@codec-copy",
 });
 
 labeled_enum!(Hw {
-    Cpu => "CPU (software)",
-    Nvidia => "GPU NVIDIA (NVENC)",
-    Intel => "GPU Intel (Quick Sync)",
-    Amd => "GPU AMD (AMF)",
+    Cpu => "@hw-windows",
+    Nvidia => "@hw-nvidia",
+    Intel => "@hw-intel",
+    Amd => "@hw-amd",
 });
 
 labeled_enum!(RateMode {
-    Quality => "Qualidade constante (CRF)",
-    Bitrate => "Bitrate fixo",
-    TargetSize => "Tamanho-alvo do arquivo",
+    Quality => "@rate-quality",
+    Bitrate => "@rate-bitrate",
+    TargetSize => "@rate-target-size",
 });
 
 labeled_enum!(Speed {
-    Fast => "Rápido",
-    Medium => "Equilibrado",
-    Slow => "Lento (melhor compressão)",
+    Fast => "@speed-fast",
+    Medium => "@speed-medium",
+    Slow => "@speed-slow",
 });
 
 labeled_enum!(AudioCodec {
     Aac => "AAC",
     Opus => "Opus",
     Mp3 => "MP3",
-    Pcm => "PCM (sem compressão)",
-    Copy => "Copiar (sem reencode)",
-    None => "Sem áudio",
+    Pcm => "@audio-pcm",
+    Copy => "@codec-copy",
+    None => "@audio-none",
 });
 
 impl Container {
@@ -164,7 +169,7 @@ impl Default for Preset {
     fn default() -> Self {
         Self {
             id: String::new(),
-            name: "Novo preset".into(),
+            name: crate::t!("preset-new-name"),
             in_menu: true,
             container: Container::Mp4,
             video: VideoCodec::H264,
@@ -241,12 +246,22 @@ pub fn fmt_kbps(kbps: u32) -> String {
     }
 }
 
+/// Nome de fábrica de um preset no idioma ativo (mesma tabela usada pela DLL do menu).
+fn factory_name(id: &str) -> String {
+    let lang = crate::i18n::current_index();
+    crate::i18n::menu::DEFAULT_PRESETS
+        .iter()
+        .find(|(preset_id, _)| *preset_id == id)
+        .map(|(_, names)| names[lang].to_string())
+        .unwrap_or_else(|| id.to_string())
+}
+
 fn default_presets() -> Vec<Preset> {
     let base = Preset::default();
     vec![
         Preset {
             id: "whatsapp".into(),
-            name: "WhatsApp".into(),
+            name: factory_name("whatsapp"),
             crf: 27,
             max_short_side: 720,
             max_fps: 30,
@@ -256,7 +271,7 @@ fn default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "3mbps".into(),
-            name: "3 Mbps".into(),
+            name: factory_name("3mbps"),
             rate_mode: RateMode::Bitrate,
             video_kbps: 3000,
             suffix: "_3mbps".into(),
@@ -264,7 +279,7 @@ fn default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "mp4".into(),
-            name: "MP4".into(),
+            name: factory_name("mp4"),
             crf: 21,
             audio_kbps: 160,
             suffix: "_mp4".into(),
@@ -272,7 +287,7 @@ fn default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "youtube".into(),
-            name: "YouTube".into(),
+            name: factory_name("youtube"),
             crf: 17,
             speed: Speed::Slow,
             audio_kbps: 320,
@@ -281,7 +296,7 @@ fn default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "hevc".into(),
-            name: "HEVC compacto".into(),
+            name: factory_name("hevc"),
             video: VideoCodec::H265,
             crf: 26,
             suffix: "_hevc".into(),
@@ -289,7 +304,7 @@ fn default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "gif".into(),
-            name: "GIF".into(),
+            name: factory_name("gif"),
             container: Container::Gif,
             max_short_side: 480,
             max_fps: 12,
@@ -298,7 +313,7 @@ fn default_presets() -> Vec<Preset> {
         },
         Preset {
             id: "mp3".into(),
-            name: "Extrair MP3".into(),
+            name: factory_name("mp3"),
             container: Container::Mp3,
             audio: AudioCodec::Mp3,
             audio_kbps: 192,
@@ -320,36 +335,36 @@ pub struct Config {
     pub close_when_done: bool,
     /// Preset pré-selecionado para arquivos adicionados pela janela principal.
     pub default_preset: String,
+    /// Idioma da interface ("system" segue o Windows).
+    pub language: crate::i18n::Language,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             presets: default_presets(),
-            extensions: [
-                "mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv", "flv", "mpg", "mpeg", "mts",
-                "m2ts", "ts", "3gp", "mxf", "ogv", "vob", "gif",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+            // Mesma lista que o pacote da Store declara no manifesto (tools/package_msix.ps1).
+            extensions: include_str!("../shared/video_extensions.txt").split_whitespace().map(String::from).collect(),
             ffmpeg_dir: String::new(),
             close_when_done: true,
             default_preset: "whatsapp".into(),
+            language: crate::i18n::Language::System,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    include!("../shared/default_menu.rs");
+    use crate::i18n::menu::DEFAULT_PRESETS;
 
-    /// A DLL do menu mostra `DEFAULT_MENU` antes de existir um config.json.
+    /// A DLL do menu mostra `DEFAULT_PRESETS` antes de existir um config.json: os ids
+    /// e a ordem precisam bater com os presets que o app cria.
     #[test]
     fn default_menu_matches_default_presets() {
         let presets = super::default_presets();
-        let from_presets: Vec<(&str, &str)> = presets.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
-        assert_eq!(from_presets, DEFAULT_MENU);
+        let ids: Vec<&str> = presets.iter().map(|p| p.id.as_str()).collect();
+        let menu_ids: Vec<&str> = DEFAULT_PRESETS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, menu_ids);
         assert!(presets.iter().all(|p| p.in_menu));
     }
 }
@@ -362,7 +377,12 @@ impl Config {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("AppData").join("Roaming")))
             .unwrap_or_else(|| PathBuf::from("."));
-        base.join("QuickEncoder")
+        base.join(crate::brand::DATA_DIR)
+    }
+
+    /// config.json das versões anteriores à troca de nome.
+    fn legacy_path() -> PathBuf {
+        Self::dir().with_file_name(crate::brand::LEGACY_DATA_DIR).join("config.json")
     }
 
     pub fn path() -> PathBuf {
@@ -371,6 +391,7 @@ impl Config {
 
     pub fn load() -> Self {
         let mut cfg: Config = std::fs::read_to_string(Self::path())
+            .or_else(|_| std::fs::read_to_string(Self::legacy_path()))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
@@ -390,6 +411,20 @@ impl Config {
         let tmp = Self::path().with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
         std::fs::rename(tmp, Self::path())
+    }
+
+    /// Depois de trocar o idioma: renomeia os presets de fábrica que ainda têm o nome
+    /// original (em qualquer idioma). Nomes que o usuário mudou ficam como estão.
+    pub fn relocalize_factory_names(&mut self) {
+        let lang = crate::i18n::current_index();
+        for p in &mut self.presets {
+            let factory = crate::i18n::menu::DEFAULT_PRESETS.iter().find(|(id, _)| *id == p.id);
+            if let Some((_, names)) = factory {
+                if names.contains(&p.name.as_str()) {
+                    p.name = names[lang].to_string();
+                }
+            }
+        }
     }
 
     pub fn preset(&self, id: &str) -> Option<&Preset> {
@@ -420,5 +455,23 @@ impl Config {
             n += 1;
         }
         id
+    }
+}
+
+#[cfg(test)]
+mod relocalize_tests {
+    use super::*;
+
+    #[test]
+    fn factory_names_follow_language_but_custom_names_stay() {
+        let mut cfg = Config::default();
+        let mp3 = cfg.presets.iter().position(|p| p.id == "mp3").unwrap();
+        let hevc = cfg.presets.iter().position(|p| p.id == "hevc").unwrap();
+        cfg.presets[mp3].name = "Extrair MP3".into();
+        cfg.presets[hevc].name = "Meu HEVC".into();
+        crate::i18n::init(crate::i18n::Language::En);
+        cfg.relocalize_factory_names();
+        assert_eq!(cfg.presets[mp3].name, "Extract MP3");
+        assert_eq!(cfg.presets[hevc].name, "Meu HEVC");
     }
 }

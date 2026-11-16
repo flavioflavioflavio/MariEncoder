@@ -1,9 +1,15 @@
 [package]
-name = "quickencoder"
-version = "0.1.0"
+name = "mari-encoder"
+version = "1.0.0"
 edition = "2024"
-description = "Encode de vídeo rápido pelo menu contextual do Windows"
+description = "Mari Encoder — encode de vídeo rápido pelo menu de botão direito do Windows"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/flavioflavioflavio/QuickEncoder"
 build = "build.rs"
+
+[[bin]]
+name = "MariEncoder"
+path = "src/main.rs"
 
 [workspace]
 members = [".", "shellext"]
@@ -23,7 +29,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_IO",
     "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_Globalization",
 ] }
+fluent-bundle = "0.15"
+unic-langid = { version = "0.9", features = ["macros"] }
 
 [build-dependencies]
 winresource = "0.1"

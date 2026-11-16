@@ -1,8 +1,9 @@
 //! Menu de contexto do Windows 11 (o menu "novo", fora de "Mostrar mais opções").
 //!
 //! O Explorer carrega esta DLL num processo substituto (dllhost) por causa do pacote
-//! registrado pelo app. Ela expõe um comando "QuickEncoder" com um subitem por preset,
-//! lidos de %APPDATA%\QuickEncoder\config.json, e apenas dispara o quickencoder.exe
+//! do app (o esparso da versão do GitHub ou o MSIX da Store). Ela expõe o comando
+//! "Mari Encoder" com um subitem por preset, lidos de
+//! %APPDATA%\MariEncoder\config.json, e apenas dispara o MariEncoder.exe
 //! que está na mesma pasta.
 
 #![allow(non_snake_case)]
@@ -23,8 +24,14 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::{BOOL, GUID, HRESULT, HSTRING, IUnknown, Interface, PWSTR, Ref, Result, implement};
 
-/// Mesmo CLSID declarado no AppxManifest gerado pelo app (src/shell.rs).
-const CLSID_MENU: GUID = GUID::from_u128(0x7b3e5c1a_9d42_4f86_a1e7_2c5d8b946f30);
+pub mod brand {
+    include!("../../shared/brand.rs");
+}
+
+/// As duas classes (pacote esparso e Store) têm a mesma implementação.
+fn is_menu_clsid(clsid: &GUID) -> bool {
+    [brand::CLSID_DEV, brand::CLSID_STORE].iter().any(|s| GUID::try_from(*s).is_ok_and(|g| g == *clsid))
+}
 
 static MODULE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -44,7 +51,7 @@ extern "system" fn DllGetClassObject(clsid: *const GUID, iid: *const GUID, out: 
     }
     unsafe {
         *out = std::ptr::null_mut();
-        if *clsid != CLSID_MENU {
+        if !is_menu_clsid(&*clsid) {
             return CLASS_E_CLASSNOTAVAILABLE;
         }
         let factory: IClassFactory = Factory.into();
@@ -70,7 +77,7 @@ impl IClassFactory_Impl for Factory_Impl {
         if !outer.is_null() {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
-        let root: IExplorerCommand = Command { title: "QuickEncoder".into(), action: Action::Root, separator: false }.into();
+        let root: IExplorerCommand = Command { title: brand::MENU_NAME.into(), action: Action::Root, separator: false }.into();
         unsafe { root.query(iid, out).ok() }
     }
 
@@ -101,45 +108,65 @@ fn exe_path() -> Option<PathBuf> {
         return None;
     }
     let dll = PathBuf::from(OsString::from_wide(&buf[..len]));
-    Some(dll.parent()?.join("quickencoder.exe"))
+    Some(dll.parent()?.join(brand::EXE_NAME))
 }
 
 fn dup(text: &str) -> Result<PWSTR> {
     unsafe { SHStrDupW(&HSTRING::from(text)) }
 }
 
-/// %APPDATA%\QuickEncoder\config.json, o mesmo arquivo que o app grava.
+/// %APPDATA%\MariEncoder\config.json, o mesmo arquivo que o app grava.
 fn config_path() -> Option<PathBuf> {
     let roaming = unsafe { SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None) }.ok()?;
     let dir = PathBuf::from(OsString::from_wide(unsafe { roaming.as_wide() }));
     unsafe { CoTaskMemFree(Some(roaming.0 as *const c_void)) };
-    Some(dir.join("QuickEncoder").join("config.json"))
+    Some(dir.join(brand::DATA_DIR).join("config.json"))
 }
 
-include!("../../shared/default_menu.rs");
-
-/// Presets do config.json, ou o motivo de não ter conseguido lê-los.
-fn config_presets() -> std::result::Result<Vec<(String, String)>, String> {
-    let path = config_path().ok_or("pasta AppData não encontrada")?;
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    let presets = json["presets"].as_array().ok_or_else(|| format!("{}: sem lista de presets", path.display()))?;
-    Ok(presets
-        .iter()
-        .filter(|p| p["in_menu"].as_bool().unwrap_or(true))
-        .filter_map(|p| Some((p["id"].as_str()?.to_string(), p["name"].as_str()?.to_string())))
-        .collect())
+pub mod menu_i18n {
+    include!("../../shared/menu_i18n.rs");
 }
 
-/// (id, nome) dos presets do menu e de onde vieram. Sem config.json legível (o app
-/// ainda não rodou nesta conta), mostra os presets de fábrica — o app cria os mesmos
-/// na primeira execução, então os ids batem.
-fn menu_presets() -> (Vec<(String, String)>, String) {
-    match config_presets() {
-        Ok(presets) => (presets, "presets do config.json".into()),
+/// Conteúdo do config.json que o menu usa: presets (se legíveis) e o idioma.
+struct MenuConfig {
+    presets: std::result::Result<Vec<(String, String)>, String>,
+    /// Índice em `menu_i18n::LANG_CODES`.
+    lang: usize,
+}
+
+fn read_config() -> MenuConfig {
+    let windows_lang = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
+    let json: std::result::Result<serde_json::Value, String> = config_path()
+        .ok_or_else(|| "pasta AppData não encontrada".to_string())
+        .and_then(|path| {
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+        });
+    let code = json.as_ref().ok().and_then(|j| j["language"].as_str()).unwrap_or("system").to_string();
+    let presets = json.and_then(|j| {
+        let list = j["presets"].as_array().ok_or("sem lista de presets")?;
+        Ok(list
+            .iter()
+            .filter(|p| p["in_menu"].as_bool().unwrap_or(true))
+            .filter_map(|p| Some((p["id"].as_str()?.to_string(), p["name"].as_str()?.to_string())))
+            .collect())
+    });
+    MenuConfig { presets, lang: menu_i18n::lang_index(&code, windows_lang) }
+}
+
+/// (id, nome) dos presets do menu, o idioma e de onde vieram. Sem config.json legível
+/// (o app ainda não rodou nesta conta), mostra os presets de fábrica no idioma do
+/// Windows — o app cria os mesmos na primeira execução, então os ids batem.
+fn menu_presets() -> (Vec<(String, String)>, usize, String) {
+    let cfg = read_config();
+    match cfg.presets {
+        Ok(presets) => (presets, cfg.lang, "presets do config.json".into()),
         Err(why) => {
-            let defaults = DEFAULT_MENU.iter().map(|(id, name)| (id.to_string(), name.to_string())).collect();
-            (defaults, format!("presets de fábrica ({why})"))
+            let defaults = menu_i18n::DEFAULT_PRESETS
+                .iter()
+                .map(|(id, names)| (id.to_string(), names[cfg.lang].to_string()))
+                .collect();
+            (defaults, cfg.lang, format!("presets de fábrica ({why})"))
         }
     }
 }
@@ -197,7 +224,7 @@ impl IExplorerCommand_Impl for Command_Impl {
         // O menu do Windows 11 não exibe dicas; no item raiz ela serve de diagnóstico
         // (examples/probe.rs mostra de onde os presets estão vindo).
         match self.action {
-            Action::Root => dup(&menu_presets().1),
+            Action::Root => dup(&menu_presets().2),
             _ => Err(E_NOTIMPL.into()),
         }
     }
@@ -240,14 +267,16 @@ impl IExplorerCommand_Impl for Command_Impl {
         if !matches!(self.action, Action::Root) {
             return Err(E_NOTIMPL.into());
         }
-        let mut items: Vec<IExplorerCommand> = menu_presets()
-            .0
+        let (presets, lang, _) = menu_presets();
+        let mut items: Vec<IExplorerCommand> = presets
             .into_iter()
             .map(|(id, name)| Command { title: name, action: Action::Preset(id), separator: false }.into())
             .collect();
         let separator = !items.is_empty();
-        items.push(Command { title: "Abrir no QuickEncoder…".into(), action: Action::AddToList, separator }.into());
-        items.push(Command { title: "Editar presets…".into(), action: Action::EditPresets, separator: false }.into());
+        let open = menu_i18n::MENU_OPEN[lang].to_string();
+        let edit = menu_i18n::MENU_EDIT_PRESETS[lang].to_string();
+        items.push(Command { title: open, action: Action::AddToList, separator }.into());
+        items.push(Command { title: edit, action: Action::EditPresets, separator: false }.into());
         Ok(SubCommands { items, pos: AtomicUsize::new(0) }.into())
     }
 }
