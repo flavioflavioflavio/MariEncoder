@@ -16,7 +16,7 @@ O Mari Encoder converte vídeos inteiramente no seu computador.
   no seu navegador e seguem as políticas desses sites.
 
 Dúvidas: abra uma issue em
-<https://github.com/flavioflavioflavio/QuickEncoder/issues>.
+<https://github.com/flavioflavioflavio/MariEncoder/issues>.
 
 ---
 
@@ -38,4 +38,4 @@ Mari Encoder converts videos entirely on your computer.
   your browser and follow those sites' policies.
 
 Questions: open an issue at
-<https://github.com/flavioflavioflavio/QuickEncoder/issues>.
+<https://github.com/flavioflavioflavio/MariEncoder/issues>.

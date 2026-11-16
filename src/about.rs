@@ -6,8 +6,8 @@ use crate::shell::{is_packaged, open_url};
 use crate::theme;
 use eframe::egui::{self, RichText};
 
-const REPO_URL: &str = "https://github.com/flavioflavioflavio/QuickEncoder";
-const RELEASES_URL: &str = "https://github.com/flavioflavioflavio/QuickEncoder/releases";
+const REPO_URL: &str = "https://github.com/flavioflavioflavio/MariEncoder";
+const RELEASES_URL: &str = "https://github.com/flavioflavioflavio/MariEncoder/releases";
 const LINKEDIN_URL: &str = "https://www.linkedin.com/in/takemotoflavio/";
 const EVOMIND_URL: &str = "https://evomind.app/investors";
 /// Mesmo canal oficial de doação do MariPDF (botão hospedado do PayPal do autor).
