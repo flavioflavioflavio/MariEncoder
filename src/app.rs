@@ -70,8 +70,10 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, initial: Msg, compact: bool) -> Self {
         theme::apply(&cc.egui_ctx);
-        let cfg = Config::load();
+        let mut cfg = Config::load();
         crate::i18n::init(cfg.language);
+        // Presets de fábrica ainda com o nome original seguem o idioma ativo.
+        cfg.relocalize_factory_names();
         if !Config::path().exists() {
             let _ = cfg.save();
         }
